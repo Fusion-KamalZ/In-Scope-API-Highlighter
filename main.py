@@ -13,6 +13,7 @@ from javax.swing import (
 from javax.swing.table import DefaultTableModel
 from javax.swing.event import TableModelListener
 from java.awt import BorderLayout, FlowLayout, Font, Dimension, Color
+import java.io
 
 # Workaround to load local modules in Burp's Jython environment
 if os.getcwd() not in sys.path:
@@ -61,9 +62,15 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         # --- UI Initialization ---
         self._panel = JPanel(BorderLayout())
         
-        # 1. Top Control Panel
-        control_panel = JPanel(FlowLayout(FlowLayout.LEFT))
-        control_panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+        # 1. Top Control Panel with multiple rows
+        from javax.swing import BoxLayout, JTextField, Box
+        
+        control_wrapper = JPanel()
+        control_wrapper.setLayout(BoxLayout(control_wrapper, BoxLayout.Y_AXIS))
+        control_wrapper.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+        
+        # === Row 1: Import Buttons ===
+        row1 = JPanel(FlowLayout(FlowLayout.LEFT))
         
         btn_load = JButton("Load Postman Collection", actionPerformed=self.load_collection)
         btn_load.setFont(Font("SansSerif", Font.BOLD, 12))
@@ -71,33 +78,69 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         btn_import_text = JButton("Import Text File", actionPerformed=self.load_text_file)
         btn_import_text.setFont(Font("SansSerif", Font.BOLD, 12))
 
-        btn_reset = JButton("Reset", actionPerformed=self.reset_state)
+        btn_reset = JButton("Reset All", actionPerformed=self.reset_state)
         btn_reset.setFont(Font("SansSerif", Font.BOLD, 12))
         btn_reset.setForeground(Color.RED)
-        
-        self._cb_unique = JCheckBox("Unique Highlight Only", actionPerformed=self.toggle_unique)
-        
-        self._cb_check_method = JCheckBox("Check Method", True, actionPerformed=self.toggle_check_method)
         
         self._lbl_status = JLabel("Status: Waiting for input...")
         self._lbl_status.setForeground(Color.GRAY)
         
-        control_panel.add(btn_load)
-        control_panel.add(btn_import_text)
-        control_panel.add(self._cb_unique)
-        control_panel.add(self._cb_check_method)
+        row1.add(btn_load)
+        row1.add(btn_import_text)
+        row1.add(btn_reset)
+        row1.add(Box.createHorizontalStrut(20))
+        row1.add(self._lbl_status)
         
-        # Color Selector
+        # === Row 2: Options ===
+        row2 = JPanel(FlowLayout(FlowLayout.LEFT))
+        
+        self._cb_unique = JCheckBox("Unique Highlight Only", actionPerformed=self.toggle_unique)
+        self._cb_check_method = JCheckBox("Check Method", True, actionPerformed=self.toggle_check_method)
+        
         color_label = JLabel("Highlight Color:")
         color_label.setFont(Font("SansSerif", Font.BOLD, 12))
         self._color_combo = JComboBox(list(HIGHLIGHT_COLORS.keys()))
-        self._color_combo.setSelectedIndex(0)  # Default to Classic Green
+        self._color_combo.setSelectedIndex(0)
         self._color_combo.addActionListener(self.change_color)
-        control_panel.add(color_label)
-        control_panel.add(self._color_combo)
         
-        control_panel.add(btn_reset)
-        control_panel.add(self._lbl_status)
+        row2.add(self._cb_unique)
+        row2.add(self._cb_check_method)
+        row2.add(Box.createHorizontalStrut(20))
+        row2.add(color_label)
+        row2.add(self._color_combo)
+        
+        # === Row 3: State File Path ===
+        row3 = JPanel(FlowLayout(FlowLayout.LEFT))
+        
+        from config import STATE_FILE
+        path_label = JLabel("State File:")
+        path_label.setFont(Font("SansSerif", Font.BOLD, 12))
+        
+        self._state_path_field = JTextField(STATE_FILE, 40)
+        self._state_path_field.setFont(Font("Monospaced", Font.PLAIN, 11))
+        
+        btn_browse = JButton("Browse...", actionPerformed=self.browse_state_path)
+        btn_browse.setFont(Font("SansSerif", Font.PLAIN, 11))
+        
+        btn_save = JButton("Save State", actionPerformed=self.save_state)
+        btn_save.setFont(Font("SansSerif", Font.BOLD, 12))
+        btn_save.setForeground(Color.BLUE)
+        
+        btn_load_state = JButton("Load State", actionPerformed=self.load_state)
+        btn_load_state.setFont(Font("SansSerif", Font.BOLD, 12))
+        btn_load_state.setForeground(Color.BLUE)
+        
+        row3.add(path_label)
+        row3.add(self._state_path_field)
+        row3.add(btn_browse)
+        row3.add(Box.createHorizontalStrut(10))
+        row3.add(btn_save)
+        row3.add(btn_load_state)
+        
+        # Add all rows to wrapper
+        control_wrapper.add(row1)
+        control_wrapper.add(row2)
+        control_wrapper.add(row3)
         
         # 2. API Table (Center) - Editable table for user modifications
         self._table_model = DefaultTableModel(["Method", "Path"], 0)
@@ -125,7 +168,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         split_pane.setDividerLocation(300)
         split_pane.setResizeWeight(0.6)
         
-        self._panel.add(control_panel, BorderLayout.NORTH)
+        self._panel.add(control_wrapper, BorderLayout.NORTH)
         self._panel.add(split_pane, BorderLayout.CENTER)
         
         # --- Registration ---
@@ -134,6 +177,9 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         
         self.log("Extension loaded successfully. Ready to import Postman collection.")
         self.debug_mode = True
+        
+        # Auto-load previous state if available
+        self._try_auto_load()
 
     # ITab
     def getTabCaption(self):
@@ -211,6 +257,83 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         selected_name = self._color_combo.getSelectedItem()
         state.highlight_color = HIGHLIGHT_COLORS.get(selected_name, "green")
         self.log("Highlight Color changed to: {} ({})".format(selected_name, state.highlight_color))
+
+    def browse_state_path(self, event):
+        """Open file chooser to select custom state file path"""
+        chooser = JFileChooser()
+        chooser.setDialogTitle("Select State File Location")
+        chooser.setSelectedFile(java.io.File(self._state_path_field.getText()))
+        
+        if chooser.showSaveDialog(self._panel) == JFileChooser.APPROVE_OPTION:
+            selected_path = chooser.getSelectedFile().getPath()
+            # Ensure .json extension
+            if not selected_path.endswith(".json"):
+                selected_path += ".json"
+            self._state_path_field.setText(selected_path)
+            self.log("State file path set to: " + selected_path)
+
+    def _get_state_path(self):
+        """Get the current state file path from the text field"""
+        path = self._state_path_field.getText().strip()
+        return path if path else None
+
+    def save_state(self, event):
+        """Save current state to file for persistence"""
+        custom_path = self._get_state_path()
+        success, msg = state.save_state(custom_path)
+        if success:
+            self.log("[SAVED] " + msg)
+            self._lbl_status.setText("State Saved!")
+            self._lbl_status.setForeground(Color.BLUE)
+        else:
+            self.log("[ERROR] " + msg)
+            self._lbl_status.setText("Save Failed")
+            self._lbl_status.setForeground(Color.RED)
+
+    def load_state(self, event):
+        """Load previously saved state from file"""
+        custom_path = self._get_state_path()
+        success, msg = state.load_state(custom_path)
+        if success:
+            self._restore_ui_from_state()
+            self.log("[LOADED] " + msg)
+        else:
+            self.log("[INFO] " + msg)
+            self._lbl_status.setText("No saved state found")
+            self._lbl_status.setForeground(Color.GRAY)
+
+    def _try_auto_load(self):
+        """Auto-load previous state on extension startup"""
+        custom_path = self._get_state_path()
+        success, msg = state.load_state(custom_path)
+        if success:
+            self._restore_ui_from_state()
+            self.log("[AUTO-LOAD] " + msg)
+        else:
+            self.log("[INFO] No previous state to restore.")
+
+    def _restore_ui_from_state(self):
+        """Restore UI components from loaded state"""
+        # Restore checkboxes
+        self._cb_unique.setSelected(state.is_unique_url_enabled)
+        self._cb_check_method.setSelected(state.is_check_method_enabled)
+        
+        # Restore color dropdown
+        for name, color in HIGHLIGHT_COLORS.items():
+            if color == state.highlight_color:
+                self._color_combo.setSelectedItem(name)
+                break
+        
+        # Restore table - clear and repopulate
+        self._table_model.setRowCount(0)
+        for api in state.parsed_apis:
+            self._table_model.addRow([api['method'], api['path']])
+        
+        # Update status
+        total_apis = len(state.parsed_apis)
+        seen_count = len(state.seen_apis)
+        self._lbl_status.setText("Restored: {} APIs, {} seen".format(total_apis, seen_count))
+        self._lbl_status.setForeground(Color(0, 100, 0))
 
     def log(self, msg):
         self._log_area.append(msg + "\n")
