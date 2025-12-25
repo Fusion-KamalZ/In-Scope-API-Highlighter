@@ -13,7 +13,7 @@ Highlights In-Scope Proxy traffic if it matches requests in a Postman Collection
 1.  **Requirement**: Jython Standalone JAR configured in Burp (Extender > Options > Python Environment).
 2.  **Add Extension**:
     -   Type: `Python`
-    -   File: `main.py`
+    -   File: `main.py` (in `C:\TMP\VibeCoding\Inscope idenifier\BurpExtension`)
 
 ## Usage
 1.  Go to the **Postman Analyzer** tab.
@@ -27,4 +27,3 @@ Highlights In-Scope Proxy traffic if it matches requests in a Postman Collection
 1.  **Check Scope**: Ensure your target URL is added to **Target > Scope**.
 2.  **Check Table**: Verify that your API paths are correctly listed in the extension table.
 3.  **Check Logs**: Look at the "Extension Logs" pane at the bottom for match confirmations.
-

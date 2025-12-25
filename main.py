@@ -7,17 +7,48 @@ from burp import IBurpExtender, IHttpListener, ITab
 # Swing imports
 from javax.swing import (
     JPanel, JButton, JCheckBox, JFileChooser, JLabel, JScrollPane, 
-    JTextArea, JTable, JSplitPane, BorderFactory, ListSelectionModel
+    JTextArea, JTable, JSplitPane, BorderFactory, ListSelectionModel,
+    JComboBox
 )
 from javax.swing.table import DefaultTableModel
+from javax.swing.event import TableModelListener
 from java.awt import BorderLayout, FlowLayout, Font, Dimension, Color
 
 # Workaround to load local modules in Burp's Jython environment
 if os.getcwd() not in sys.path:
     sys.path.append(os.getcwd())
 
-from config import state
+from config import state, HIGHLIGHT_COLORS
 from postman_parser import parse_postman_collection, parse_text_file
+
+
+class TableEditListener(TableModelListener):
+    """Listener to sync table edits back to state.parsed_apis"""
+    
+    def __init__(self, extender):
+        self.extender = extender
+    
+    def tableChanged(self, event):
+        # Only handle UPDATE events (not INSERT/DELETE during load)
+        if event.getType() == event.UPDATE:
+            row = event.getFirstRow()
+            col = event.getColumn()
+            
+            # Validate row index
+            if row < 0 or row >= len(state.parsed_apis):
+                return
+            
+            new_value = self.extender._table_model.getValueAt(row, col)
+            
+            if col == 0:  # Method column
+                old_value = state.parsed_apis[row]['method']
+                state.parsed_apis[row]['method'] = str(new_value).upper()
+                self.extender.log("Row {}: Method changed '{}' -> '{}'".format(row, old_value, new_value))
+            elif col == 1:  # Path column
+                old_value = state.parsed_apis[row]['path']
+                state.parsed_apis[row]['path'] = str(new_value)
+                self.extender.log("Row {}: Path changed '{}' -> '{}'".format(row, old_value, new_value))
+
 
 class BurpExtender(IBurpExtender, IHttpListener, ITab):
     
@@ -46,16 +77,29 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         
         self._cb_unique = JCheckBox("Unique Highlight Only", actionPerformed=self.toggle_unique)
         
+        self._cb_check_method = JCheckBox("Check Method", True, actionPerformed=self.toggle_check_method)
+        
         self._lbl_status = JLabel("Status: Waiting for input...")
         self._lbl_status.setForeground(Color.GRAY)
         
         control_panel.add(btn_load)
         control_panel.add(btn_import_text)
         control_panel.add(self._cb_unique)
+        control_panel.add(self._cb_check_method)
+        
+        # Color Selector
+        color_label = JLabel("Highlight Color:")
+        color_label.setFont(Font("SansSerif", Font.BOLD, 12))
+        self._color_combo = JComboBox(list(HIGHLIGHT_COLORS.keys()))
+        self._color_combo.setSelectedIndex(0)  # Default to Classic Green
+        self._color_combo.addActionListener(self.change_color)
+        control_panel.add(color_label)
+        control_panel.add(self._color_combo)
+        
         control_panel.add(btn_reset)
         control_panel.add(self._lbl_status)
         
-        # 2. API Table (Center)
+        # 2. API Table (Center) - Editable table for user modifications
         self._table_model = DefaultTableModel(["Method", "Path"], 0)
         self._table = JTable(self._table_model)
         self._table.setFillsViewportHeight(True)
@@ -63,8 +107,11 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self._table.getTableHeader().setFont(Font("SansSerif", Font.BOLD, 12))
         self._table.setRowHeight(20)
         
+        # Add listener to sync table edits back to state
+        self._table_model.addTableModelListener(TableEditListener(self))
+        
         table_scroll = JScrollPane(self._table)
-        table_scroll.setBorder(BorderFactory.createTitledBorder("Extracted APIs"))
+        table_scroll.setBorder(BorderFactory.createTitledBorder("Extracted APIs (Editable)"))
         
         # 3. Logs (Bottom)
         self._log_area = JTextArea()
@@ -156,6 +203,15 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         state.is_unique_url_enabled = self._cb_unique.isSelected()
         self.log("Unique filter: {}".format(state.is_unique_url_enabled))
 
+    def toggle_check_method(self, event):
+        state.is_check_method_enabled = self._cb_check_method.isSelected()
+        self.log("Check Method: {}".format(state.is_check_method_enabled))
+
+    def change_color(self, event):
+        selected_name = self._color_combo.getSelectedItem()
+        state.highlight_color = HIGHLIGHT_COLORS.get(selected_name, "green")
+        self.log("Highlight Color changed to: {} ({})".format(selected_name, state.highlight_color))
+
     def log(self, msg):
         self._log_area.append(msg + "\n")
         # Also print to stdout for standard debug
@@ -192,8 +248,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                     return
                 state.seen_apis.add(identifier)
             
-            messageInfo.setHighlight("green")
-            self.log("[MATCH] Highlighted: " + identifier)
+            messageInfo.setHighlight(state.highlight_color)
+            self.log("[MATCH] Highlighted ({}): {}".format(state.highlight_color, identifier))
         else:
             # Verbose debug for troubleshooting "Why isn't it highlighting?"
             # Only print if it looks like an API call to reduce noise? 
@@ -205,11 +261,15 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         burp_clean = burp_path.rstrip('/')
         if not burp_clean: burp_clean = "/"
         
-        # Filter by method
-        same_method_apis = [api.get('path') for api in state.parsed_apis if api['method'].upper() == method.upper()]
+        # Get APIs to check - filter by method only if Check Method is enabled
+        if state.is_check_method_enabled:
+            apis_to_check = [api.get('path') for api in state.parsed_apis if api['method'].upper() == method.upper()]
+        else:
+            # Ignore method, match any endpoint
+            apis_to_check = [api.get('path') for api in state.parsed_apis]
         
         # Flexible match (ignore trailing slash)
-        for api_path in same_method_apis:
+        for api_path in apis_to_check:
             norm_api = api_path.rstrip('/')
             if not norm_api: norm_api = "/"
             
